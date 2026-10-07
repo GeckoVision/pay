@@ -1150,6 +1150,38 @@ fn classify_402_inner(
         };
     }
 
+    // x402 offers that reach this point carry no Solana path (`x402::parse`
+    // keeps Solana offers only). Name the networks the server did offer, so
+    // the caller sees a chain mismatch, not an unrecognized protocol.
+    let mut x402_networks: Vec<&str> = Vec::new();
+    for network in advertised_challenges
+        .x402
+        .iter()
+        .filter_map(|offer| offer.get("network").and_then(serde_json::Value::as_str))
+    {
+        if !x402_networks.contains(&network) {
+            x402_networks.push(network);
+        }
+    }
+    if !x402_networks.is_empty()
+        && !x402_networks
+            .iter()
+            .any(|network| network.starts_with("solana"))
+    {
+        let reason = format!(
+            "Server offers x402 on {} only; pay settles on Solana. \
+             This endpoint is not compatible with `pay`. \
+             Check if the provider supports Solana USDC.",
+            x402_networks.join(", ")
+        );
+        return RunOutcome::PaymentRejected {
+            reason,
+            retryable: false,
+            advertised_challenges,
+            resource_url: resource_url.to_string(),
+        };
+    }
+
     RunOutcome::UnknownPaymentRequired {
         headers: headers.to_vec(),
         advertised_challenges,
@@ -2791,6 +2823,40 @@ HTTP request sent, awaiting response...
                     reason.contains("non-Solana"),
                     "Expected non-Solana message, got: {reason}"
                 );
+            }
+            other => panic!("Expected PaymentRejected, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_402_rejects_evm_only_x402_naming_the_network() {
+        use base64::Engine;
+
+        let payment_required = serde_json::json!({
+            pay_kit::x402::X402_VERSION_FIELD: pay_kit::x402::X402_VERSION_V2,
+            "accepts": [{
+                "scheme": pay_kit::x402::exact::EXACT_SCHEME,
+                "network": "eip155:8453",
+                "amount": "10000",
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "payTo": "0x325bdF6F7efAB24a2210c48c1b64cAb2eAe1d430",
+                "maxTimeoutSeconds": 300
+            }]
+        });
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(payment_required.to_string().as_bytes());
+        let headers = vec![(pay_kit::x402::PAYMENT_REQUIRED_HEADER.to_string(), encoded)];
+
+        let outcome = classify_402(&headers, None, "https://base-only.example.com/api");
+        match outcome {
+            RunOutcome::PaymentRejected {
+                reason, retryable, ..
+            } => {
+                assert!(
+                    reason.contains("eip155:8453"),
+                    "Expected the offered network in the reason, got: {reason}"
+                );
+                assert!(!retryable);
             }
             other => panic!("Expected PaymentRejected, got: {other:?}"),
         }
