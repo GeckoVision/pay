@@ -424,13 +424,9 @@ fn probe_endpoint(
         vec![]
     };
 
-    let raw = fetch_raw_with_timeout(
-        method,
-        url,
-        &headers,
-        body,
-        Duration::from_secs(config.timeout_secs),
-    );
+    // 0 keeps the old behaviour (client default) instead of failing every probe at once.
+    let timeout = (config.timeout_secs > 0).then(|| Duration::from_secs(config.timeout_secs));
+    let raw = fetch_raw_with_timeout(method, url, &headers, body, timeout);
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let (status, paid, probe_status, http_status) = match raw {
@@ -982,6 +978,6 @@ mod tests {
             .expect("probe ignored timeout_secs = 1");
         assert!(matches!(result.status, ProbeStatus::Error { .. }));
         assert_eq!(result.probe_status, "error");
-        assert!(result.duration_ms < 5_000);
+        assert!(result.duration_ms < 3_000);
     }
 }

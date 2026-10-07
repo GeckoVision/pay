@@ -722,6 +722,7 @@ pub fn fetch_raw_with_body_for(
 }
 
 /// Like [`fetch_raw`], but the whole request fails once `timeout` elapses.
+/// `None` keeps the client default.
 ///
 /// The skills probe uses this so `--probe-timeout` bounds each endpoint.
 pub fn fetch_raw_with_timeout(
@@ -729,7 +730,7 @@ pub fn fetch_raw_with_timeout(
     url: &str,
     extra_headers: &[(String, String)],
     body: Option<&str>,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<RawResponse> {
     let method = Method::from_bytes(method.as_bytes())
         .map_err(|e| Error::Mpp(format!("Invalid HTTP method `{method}`: {e}")))?;
@@ -742,7 +743,7 @@ pub fn fetch_raw_with_timeout(
         body.as_ref(),
         RedirectPolicy::Follow,
         OutboundPolicy::Unrestricted,
-        Some(timeout),
+        timeout,
     )
 }
 
