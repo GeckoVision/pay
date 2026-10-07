@@ -10,13 +10,13 @@
 //! `pricing`, `protocol`, and `supported_usd` fields in the published index.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pay_types::Stablecoin;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::client::fetch::fetch_raw;
+use crate::client::fetch::fetch_raw_with_timeout;
 use crate::client::runner::{self, RunOutcome};
 
 // ── Currency normalization ───────────────────────────────────────────────────
@@ -424,7 +424,13 @@ fn probe_endpoint(
         vec![]
     };
 
-    let raw = fetch_raw(method, url, &headers, body);
+    let raw = fetch_raw_with_timeout(
+        method,
+        url,
+        &headers,
+        body,
+        Duration::from_secs(config.timeout_secs),
+    );
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let (status, paid, probe_status, http_status) = match raw {
@@ -950,5 +956,32 @@ mod tests {
         assert_eq!(amount_to_usd("1000000", 6), Some(1.0));
         assert_eq!(amount_to_usd("0", 6), Some(0.0));
         assert_eq!(amount_to_usd("not a number", 6), None);
+    }
+
+    #[test]
+    fn probe_endpoint_applies_configured_timeout() {
+        // Accepts the connection, then never writes a response.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/stalled", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let _held: Vec<_> = listener.incoming().collect();
+        });
+
+        let config = ProbeConfig {
+            timeout_secs: 1,
+            ..ProbeConfig::default()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(probe_endpoint("GET", &url, None, &config));
+        });
+
+        // Guard the test itself so a missing timeout fails instead of hanging.
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("probe ignored timeout_secs = 1");
+        assert!(matches!(result.status, ProbeStatus::Error { .. }));
+        assert_eq!(result.probe_status, "error");
+        assert!(result.duration_ms < 5_000);
     }
 }
