@@ -1150,24 +1150,23 @@ fn classify_402_inner(
         };
     }
 
-    // x402 offers that reach this point carry no Solana path (`x402::parse`
-    // keeps Solana offers only). Name the networks the server did offer, so
-    // the caller sees a chain mismatch, not an unrecognized protocol.
+    // x402 offers that reach this point did not parse. When every offer names
+    // a non-Solana network, say so, so the caller sees a chain mismatch, not
+    // an unrecognized protocol. pay-kit reads a missing `network` as Solana,
+    // so such an offer (or any Solana slug) leaves the outcome unknown.
     let mut x402_networks: Vec<&str> = Vec::new();
-    for network in advertised_challenges
-        .x402
-        .iter()
-        .filter_map(|offer| offer.get("network").and_then(serde_json::Value::as_str))
-    {
-        if !x402_networks.contains(&network) {
-            x402_networks.push(network);
+    let mut any_solana_offer = false;
+    for offer in &advertised_challenges.x402 {
+        match offer.get("network").and_then(serde_json::Value::as_str) {
+            Some(network) if pay_kit::x402::exact::cluster_for_caip2_network(network).is_none() => {
+                if !x402_networks.contains(&network) {
+                    x402_networks.push(network);
+                }
+            }
+            _ => any_solana_offer = true,
         }
     }
-    if !x402_networks.is_empty()
-        && !x402_networks
-            .iter()
-            .any(|network| network.starts_with("solana"))
-    {
+    if !x402_networks.is_empty() && !any_solana_offer {
         let reason = format!(
             "Server offers x402 on {} only; pay settles on Solana. \
              This endpoint is not compatible with `pay`. \
@@ -2860,6 +2859,36 @@ HTTP request sent, awaiting response...
             }
             other => panic!("Expected PaymentRejected, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_402_keeps_unparsed_solana_slug_x402_unknown() {
+        use base64::Engine;
+
+        // `mainnet-beta` is a Solana slug; an offer that fails to parse for
+        // another reason (here an unknown transaction version) is not a
+        // chain mismatch.
+        let payment_required = serde_json::json!({
+            pay_kit::x402::X402_VERSION_FIELD: pay_kit::x402::X402_VERSION_V2,
+            "accepts": [{
+                "scheme": pay_kit::x402::exact::EXACT_SCHEME,
+                "network": "mainnet-beta",
+                "amount": "10000",
+                "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "payTo": "11111111111111111111111111111111",
+                "maxTimeoutSeconds": 300,
+                "extra": { "transactionVersions": ["not-a-version"] }
+            }]
+        });
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(payment_required.to_string().as_bytes());
+        let headers = vec![(pay_kit::x402::PAYMENT_REQUIRED_HEADER.to_string(), encoded)];
+
+        let outcome = classify_402(&headers, None, "https://solana-slug.example.com/api");
+        assert!(
+            matches!(outcome, RunOutcome::UnknownPaymentRequired { .. }),
+            "Expected UnknownPaymentRequired, got: {outcome:?}"
+        );
     }
 
     #[test]
