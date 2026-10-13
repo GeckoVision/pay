@@ -2892,6 +2892,55 @@ HTTP request sent, awaiting response...
     }
 
     #[test]
+    fn classify_402_keeps_mixed_x402_offers_unknown() {
+        use base64::Engine;
+
+        // The rejection needs every offer to name a non-Solana network. A Base
+        // offer next to an unparsed Solana offer, or next to an unparsed offer
+        // with no `network`, is not a chain mismatch, in either order.
+        let base = serde_json::json!({
+            "scheme": pay_kit::x402::exact::EXACT_SCHEME,
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x325bdF6F7efAB24a2210c48c1b64cAb2eAe1d430",
+            "maxTimeoutSeconds": 300
+        });
+        let unparsed_solana = serde_json::json!({
+            "scheme": pay_kit::x402::exact::EXACT_SCHEME,
+            "network": "mainnet-beta",
+            "amount": "10000",
+            "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "payTo": "11111111111111111111111111111111",
+            "maxTimeoutSeconds": 300,
+            "extra": { "transactionVersions": ["not-a-version"] }
+        });
+        let mut unparsed_no_network = unparsed_solana.clone();
+        unparsed_no_network
+            .as_object_mut()
+            .expect("offer is an object")
+            .remove("network");
+
+        for other in [&unparsed_solana, &unparsed_no_network] {
+            for accepts in [vec![&base, other], vec![other, &base]] {
+                let payment_required = serde_json::json!({
+                    pay_kit::x402::X402_VERSION_FIELD: pay_kit::x402::X402_VERSION_V2,
+                    "accepts": accepts
+                });
+                let encoded = base64::engine::general_purpose::STANDARD
+                    .encode(payment_required.to_string().as_bytes());
+                let headers = vec![(pay_kit::x402::PAYMENT_REQUIRED_HEADER.to_string(), encoded)];
+
+                let outcome = classify_402(&headers, None, "https://mixed.example.com/api");
+                assert!(
+                    matches!(outcome, RunOutcome::UnknownPaymentRequired { .. }),
+                    "Expected UnknownPaymentRequired for {accepts:?}, got: {outcome:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn classify_402_without_mpp() {
         let headers = vec![("content-type".to_string(), "text/html".to_string())];
         let outcome = classify_402(&headers, None, "https://example.com/resource");
