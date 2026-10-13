@@ -956,28 +956,64 @@ mod tests {
 
     #[test]
     fn probe_endpoint_applies_configured_timeout() {
-        // Accepts the connection, then never writes a response.
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Accepts one connection, then never writes a response. The server has a
+        // bounded lifetime: it stops once the probe returns, or after 5 s.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/stalled", listener.local_addr().unwrap());
-        std::thread::spawn(move || {
-            let _held: Vec<_> = listener.incoming().collect();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let conn = loop {
+                match listener.accept() {
+                    Ok((conn, _)) => break Some(conn),
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let _ = accepted_tx.send(conn.is_some());
+            let _ = stop_rx.recv_timeout(Duration::from_secs(5));
+            drop(conn);
         });
 
         let config = ProbeConfig {
             timeout_secs: 1,
             ..ProbeConfig::default()
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(probe_endpoint("GET", &url, None, &config));
         });
 
         // Guard the test itself so a missing timeout fails instead of hanging.
         let result = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(5))
             .expect("probe ignored timeout_secs = 1");
+        let _ = stop_tx.send(());
+        server.join().unwrap();
+
+        // The probe must have reached the stalled listener and waited out the
+        // timeout; an immediate connection error (e.g. via PAY_DEBUGGER_PROXY)
+        // would not exercise it.
+        assert!(
+            accepted_rx.recv().unwrap(),
+            "probe never reached the stalled listener (is PAY_DEBUGGER_PROXY set?)"
+        );
         assert!(matches!(result.status, ProbeStatus::Error { .. }));
         assert_eq!(result.probe_status, "error");
-        assert!(result.duration_ms < 3_000);
+        assert!(
+            (900..3_000).contains(&result.duration_ms),
+            "expected the 1 s timeout to end the probe, took {} ms",
+            result.duration_ms
+        );
     }
 }
